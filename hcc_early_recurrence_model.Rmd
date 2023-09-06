@@ -1,0 +1,256 @@
+---
+title: "HCC early recurrence model"
+author: 
+  - En Hu
+  
+documentclass: ctexart
+geometry: margin=0.6cm
+output:
+  rticles::ctex:
+    fig_caption: yes
+    number_sections: no
+    toc: yes
+header-includes:
+ - \usepackage{fvextra}
+ - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+ - \CTEXsetup[format={\huge\bfseries\raggedright}]{section}
+---
+# Data description
+1. all_data: MVI status (0:present,1:absent), GSN concentrations (ug/ul), AFP status (0:negative,1:positive) and DCP status (0:negative,1:positive) group (0:recurrence time ≥12m, 1:recurrence time <12m)
+2. df_cut:  the results of 10 times 5-flod cross modelling are stored, the first column is seed+fold (5661: seed=566,fold=1),the second column stores the response of the model and the third column is the real label.
+
+# 1. 5-fold validation
+```{r}
+aucs <- c()
+sens <- c()
+spec <- c()
+roclist <- list()
+df_cut <- data.frame()
+cutoff <- c()
+
+set.seed(2008)
+for(i in sample(1:1000,size=10)){
+  for(t in 1:5){
+    set.seed(i)
+    folds <- createFolds(y=all_data$group,k=5)
+    train_cv <- all_data[-folds[[t]],]
+    test_cv <- all_data[folds[[t]],]
+    pre <- glm(group~GSN+MVI,family=binomial(link = "logit"),data = train_cv)
+    auc <- pROC::roc(test_cv$group,predict(pre,test_cv,type="response"))$auc %>% as.numeric() %>% round(.,2)
+    coor <- coords(pROC::roc(test_cv$group,predict(pre,test_cv,type="response")),"best")
+    cutoff <- c(cutoff,coor[,1])
+    sens<-c(sens,coor[,3])
+    spec<-c(spec,coor[,2])
+    roclist[[paste0(i,t)]] <- pROC::roc(test_cv$group,predict(pre,test_cv,type="response"))
+    aucs <- c(aucs,auc)
+    df_cut <- rbind(df_cut,data.frame(name=paste0(i,t),pre=predict(pre,test_cv,type="response"),group=test_cv$group))
+  }
+}
+```
+# 2. Figure 6B
+## Function description
+1. mean_roc: Calculate average roc based on 50 modelling results
+```{r}
+mean_roc <- function(data, cutoffs = seq(from = 0, to = 1, by = 0.05)) {
+    map_df(cutoffs, function(cp) {
+        out <- cutpointr(data = data, 
+                         x = pre, 
+                         class = group, 
+                         subgroup = name, 
+                         method = oc_manual, 
+                         cutpoint = cp,
+                         pos_class = 1,
+                         direction = ">=")
+        data.frame(cutoff = cp,
+                   sensitivity = mean(out$sensitivity),
+                   specificity = mean(out$specificity))
+    })
+}
+
+
+roc_data <- ggplot_build(ggroc(roclist))
+roc_data <- roc_data$plot$data
+mr <- mean_roc(df_cut)
+CI(aucs)# calculate aucs
+p2 <- data.frame(threshold=0,specificity=mr$specificity,sensitivity=mr$sensitivity,name="mean") %>%
+    rbind(roc_data) %>%
+    mutate(name2=ifelse(name=="mean","mean","other")) %>%
+    
+    ggplot(.)+
+    # geom_ribbon(data=mr3,aes(ymin=lower,ymax=upper,x=1-x))+
+    # geom_ribbon(data=mr4,aes(xmin=lower,xmax=upper,y=y))+
+    geom_step(aes(group=name,color=name2,linetype=name2,x=1-specificity,y=sensitivity),size=1) +
+    scale_color_manual(values = c("red","grey90"))+
+    theme_classic()+
+    
+    geom_segment(x=0,y=0,xend=1,yend=1,linetype=2,size=1,color="gray20")+
+
+    # scale_x_continuous(expand = c(0,0))+
+    # scale_y_continuous(expand = c(0,0))+
+    geom_segment(x=-Inf,xend=Inf,y=Inf,yend=Inf,linewidth=rel(1.2))+
+    geom_segment(x=Inf,xend=Inf,y=-Inf,yend=Inf,linewidth=rel(1.2))+
+    
+    theme(axis.line = element_line(linewidth = rel(1.5)),
+          axis.ticks = element_line(colour = "black",size=1),
+          axis.text = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+          axis.title = element_text(family = "TNR",face = "bold",color = "black",size = 18),
+          legend.text = element_text(family = "TNR",face = "bold",color = "black",size = 12),
+          #legend.title = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+          legend.title = element_blank(),
+          legend.position = "none")+
+    geom_text(x=0.5,y=0.4,label="AUC(95% CI):0.803 [0.820,0.783]",size=5)+
+    labs(x="1-Specificity",y="Sensitivity")
+
+
+cairo_pdf(filename = "./Out/5fold_roc.pdf",height = 5.02,width = 4.96)
+p2
+dev.off()
+```
+# 3. One ROC closer to the average ROC curve was selected for further evaluation of the model
+```{r}
+set.seed(749)
+folds <- createFolds(y=all_data$group,k=5)
+train_cv <- all_data[-folds[[4]],]
+test_cv <- all_data[folds[[4]],]
+pre <- glm(group~GSN+MVI,family=binomial(link = "logit"),data = train_cv)
+summary(pre)
+pROC::roc(test_cv$group,predict(pre,test_cv,type="response"))
+```
+
+# 4. nomogram:Figure 6F
+```{r}
+logistic_lrm <- lrm(group~GSN+MVI,data = train_cv,x = T,y = T)
+dd <- datadist(train_cv)
+options(datadist="dd")
+nom <- nomogram(fit = logistic_lrm,fun = function(x)1/(1+exp(-x)),lp=T,funlabel = "12m Recurrence risk ")
+cairo_pdf(filename = "./Out/nom.pdf",height = 8.10,width = 8.10)
+plot(nom)
+dev.off()
+```
+# 5. figure 6C
+```{r}
+roc11 <- pROC::roc(train_cv$group,predict(pre,train_cv,type="response"))
+roc22 <- pROC::roc(train_cv$group,train_cv$MVI)
+roc33 <- pROC::roc(train_cv$group,train_cv$GSN)
+roc44 <- pROC::roc(train_cv$group,train_cv$DCP)
+roc55 <- pROC::roc(train_cv$group,train_cv$AFP)
+  x2 <-  ggroc(list(Model=roc11,
+                  MVI=roc22,
+                  GSN=roc33,
+                  DCP=roc44,
+                  AFP=roc55))
+ df2 <- x2$data
+ df2$specificity <- 1-df2$specificity
+ df2$name <- factor(df2$name,levels = c("Model","GSN","MVI","AFP","DCP"),
+                   labels = c("Mdoel:0.805","GSN:0.705","MVI:0.693","AFP:0.614","DCP:0.569"))
+ 
+p5 <- ggplot(df2,aes(x=specificity,y=sensitivity))+
+     geom_segment(x=0,y=0,xend=1,yend=1,linetype=2,size=1,color="gray40")+
+     geom_line(aes(group=name,color=name),size=1)+
+     theme_classic()+
+     # scale_x_continuous(expand = c(0,0))+
+     # scale_y_continuous(expand = c(0,0))+
+     geom_segment(x=-Inf,xend=Inf,y=Inf,yend=Inf,linewidth=rel(1.2))+
+     geom_segment(x=Inf,xend=Inf,y=-Inf,yend=Inf,linewidth=rel(1.2))+
+     theme(axis.line = element_line(linewidth = rel(1.5)),
+           axis.ticks = element_line(colour = "black",size=1),
+           axis.text = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+           axis.title = element_text(family = "TNR",face = "bold",color = "black",size = 18),
+           legend.text = element_text(family = "TNR",face = "bold",color = "black",size = 12),
+           #legend.title = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+           legend.title = element_blank(),
+           legend.position = c(0.8,0.25))+
+     scale_color_manual(values = c("#D62728FF","#1F77B4FF" ,"#FF7F0EFF" ,"#2CA02CFF" ,"#9467BDFF"))+
+     labs(x="1-Specificity",y="Sensitivity")
+ 
+ 
+cairo_pdf(filename = "./Out/ROC_trian.pdf",height = 4.8,width = 4.9)
+p5
+dev.off()
+```
+# 6. figur 6D
+```{r}
+roc111 <- pROC::roc(test_cv$group,predict(pre,test_cv,type="response"));roc111
+roc222 <- pROC::roc(test_cv$group,test_cv$MVI);roc222
+roc333 <- pROC::roc(test_cv$group,test_cv$GSN);roc333
+roc444<- pROC::roc(test_cv$group,test_cv$DCP);roc444
+roc555 <- pROC::roc(test_cv$group,test_cv$AFP);roc555
+
+  x3 <-  ggroc(list(Model=roc111,
+                  MVI=roc222,
+                  GSN=roc333,
+                  DCP=roc444,
+                  AFP=roc555))
+
+df3 <- x3$data
+ df3$specificity <- 1-df3$specificity
+ df3$name <- factor(df3$name,levels = c("Model","GSN","MVI","AFP","DCP"),
+                   labels = c("Mdoel:0.805","GSN:0.754","MVI:0.587","AFP:0.574","DCP:0.621"))
+ 
+p6 <- ggplot(df3,aes(x=specificity,y=sensitivity))+
+     geom_segment(x=0,y=0,xend=1,yend=1,linetype=2,size=1,color="gray40")+
+     geom_line(aes(group=name,color=name),size=1)+
+     theme_classic()+
+     # scale_x_continuous(expand = c(0,0))+
+     # scale_y_continuous(expand = c(0,0))+
+     geom_segment(x=-Inf,xend=Inf,y=Inf,yend=Inf,linewidth=rel(1.2))+
+     geom_segment(x=Inf,xend=Inf,y=-Inf,yend=Inf,linewidth=rel(1.2))+
+     theme(axis.line = element_line(linewidth = rel(1.5)),
+           axis.ticks = element_line(colour = "black",size=1),
+           axis.text = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+           axis.title = element_text(family = "TNR",face = "bold",color = "black",size = 18),
+           legend.text = element_text(family = "TNR",face = "bold",color = "black",size = 12),
+           #legend.title = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+           legend.title = element_blank(),
+           legend.position = c(0.8,0.25))+
+     scale_color_manual(values = c("#D62728FF","#1F77B4FF" ,"#FF7F0EFF" ,"#2CA02CFF" ,"#9467BDFF"))+
+     labs(x="1-Specificity",y="Sensitivity")
+ 
+ 
+cairo_pdf(filename = "./Out/ROC_valid.pdf",height = 4.8,width = 4.9)
+p6
+dev.off()
+```
+# 7. figure 6E
+```{r}
+all_data2 <- all_data[all_data$AFPPositive==0,]
+roc1111 <- pROC::roc(dus2_n$group,predict(pre,dus2_n,type="response"));roc1111
+roc2222 <- pROC::roc(dus2_n$group,dus2_n$MVI);roc2222
+roc3333 <- pROC::roc(dus2_n$group,dus2_n$GSN);roc3333
+roc4444<- pROC::roc(dus2_n$group,dus2_n$DCP);roc4444
+
+x4 <-  ggroc(list(Model=roc1111,
+                  MVI=roc2222,
+                  GSN=roc3333,
+                  DCP=roc4444))
+
+df4 <- x4$data
+ df4$specificity <- 1-df4$specificity
+ df4$name <- factor(df4$name,levels = c("Model","GSN","MVI","DCP"),
+                   labels = c("Mdoel:0.798","GSN:0.675","MVI:0.672","DCP:0.600"))
+ 
+p7 <- ggplot(df4,aes(x=specificity,y=sensitivity))+
+     geom_segment(x=0,y=0,xend=1,yend=1,linetype=2,size=1,color="gray40")+
+     geom_line(aes(group=name,color=name),size=1)+
+     theme_classic()+
+     # scale_x_continuous(expand = c(0,0))+
+     # scale_y_continuous(expand = c(0,0))+
+     geom_segment(x=-Inf,xend=Inf,y=Inf,yend=Inf,linewidth=rel(1.2))+
+     geom_segment(x=Inf,xend=Inf,y=-Inf,yend=Inf,linewidth=rel(1.2))+
+     theme(axis.line = element_line(linewidth = rel(1.5)),
+           axis.ticks = element_line(colour = "black",size=1),
+           axis.text = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+           axis.title = element_text(family = "TNR",face = "bold",color = "black",size = 18),
+           legend.text = element_text(family = "TNR",face = "bold",color = "black",size = 12),
+           #legend.title = element_text(family = "TNR",face = "bold",color = "black",size = 15),
+           legend.title = element_blank(),
+           legend.position = c(0.8,0.25))+
+     scale_color_manual(values = c("#D62728FF","#1F77B4FF" ,"#FF7F0EFF" ,"#2CA02CFF" ,"#9467BDFF"))+
+     labs(x="1-Specificity",y="Sensitivity")
+ 
+ 
+cairo_pdf(filename = "./Out/ROC_afpn.pdf",height = 4.8,width = 4.9)
+p7
+dev.off() 
+
+```
